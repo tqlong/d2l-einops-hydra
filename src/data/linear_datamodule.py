@@ -1,13 +1,15 @@
 from typing import Any, Dict, Optional, Tuple
 
-import torch
 from lightning import LightningDataModule
-from torch.utils.data import ConcatDataset, DataLoader, Dataset, random_split
-from torchvision.datasets import MNIST
-from torchvision.transforms import transforms
+from torch.utils.data import DataLoader, Dataset
+
+import rootutils
+rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
+
+from src.data.components.synthetic_linear_dataset import SyntheticLinearDataset
 
 
-class MNISTDataModule(LightningDataModule):
+class LinearDataModule(LightningDataModule):
     """`LightningDataModule` for the MNIST dataset.
 
     The MNIST database of handwritten digits has a training set of 60,000 examples, and a test set of 10,000 examples.
@@ -54,7 +56,9 @@ class MNISTDataModule(LightningDataModule):
 
     def __init__(
         self,
-        data_dir: str = "data/",
+        num_features: int = 10,
+        true_weights_seed: int = 42,
+        noise_sigma: float = 0.01,
         train_val_test_split: Tuple[int, int, int] = (55_000, 5_000, 10_000),
         batch_size: int = 64,
         num_workers: int = 0,
@@ -74,24 +78,11 @@ class MNISTDataModule(LightningDataModule):
         # also ensures init params will be stored in ckpt
         self.save_hyperparameters(logger=False)
 
-        # data transformations
-        self.transforms = transforms.Compose(
-            [transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]
-        )
-
         self.data_train: Optional[Dataset] = None
         self.data_val: Optional[Dataset] = None
         self.data_test: Optional[Dataset] = None
 
         self.batch_size_per_device = batch_size
-
-    @property
-    def num_classes(self) -> int:
-        """Get the number of classes.
-
-        :return: The number of MNIST classes (10).
-        """
-        return 10
 
     def prepare_data(self) -> None:
         """Download data if needed. Lightning ensures that `self.prepare_data()` is called only
@@ -101,8 +92,7 @@ class MNISTDataModule(LightningDataModule):
 
         Do not use it to assign state (self.x = y).
         """
-        MNIST(self.hparams.data_dir, train=True, download=True)
-        MNIST(self.hparams.data_dir, train=False, download=True)
+        pass
 
     def setup(self, stage: Optional[str] = None) -> None:
         """Load data. Set variables: `self.data_train`, `self.data_val`, `self.data_test`.
@@ -123,14 +113,25 @@ class MNISTDataModule(LightningDataModule):
             self.batch_size_per_device = self.hparams.batch_size // self.trainer.world_size
 
         # load and split datasets only if not loaded already
+        train_size, val_size, test_size = self.hparams.train_val_test_split
         if not self.data_train and not self.data_val and not self.data_test:
-            trainset = MNIST(self.hparams.data_dir, train=True, transform=self.transforms)
-            testset = MNIST(self.hparams.data_dir, train=False, transform=self.transforms)
-            dataset = ConcatDataset(datasets=[trainset, testset])
-            self.data_train, self.data_val, self.data_test = random_split(
-                dataset=dataset,
-                lengths=self.hparams.train_val_test_split,
-                generator=torch.Generator().manual_seed(42),
+            self.data_train = SyntheticLinearDataset(
+                train_size,
+                self.hparams.num_features,
+                self.hparams.true_weights_seed,
+                self.hparams.noise_sigma,
+            )
+            self.data_val = SyntheticLinearDataset(
+                val_size,
+                self.hparams.num_features,
+                self.hparams.true_weights_seed,
+                self.hparams.noise_sigma,
+            )
+            self.data_test = SyntheticLinearDataset(
+                test_size,
+                self.hparams.num_features,
+                self.hparams.true_weights_seed,
+                self.hparams.noise_sigma,
             )
 
     def train_dataloader(self) -> DataLoader[Any]:
@@ -144,7 +145,7 @@ class MNISTDataModule(LightningDataModule):
             num_workers=self.hparams.num_workers,
             pin_memory=self.hparams.pin_memory,
             shuffle=True,
-            persistent_workers=True
+            persistent_workers=self.hparams.num_workers > 0
         )
 
     def val_dataloader(self) -> DataLoader[Any]:
@@ -158,7 +159,7 @@ class MNISTDataModule(LightningDataModule):
             num_workers=self.hparams.num_workers,
             pin_memory=self.hparams.pin_memory,
             shuffle=False,
-            persistent_workers=True
+            persistent_workers=self.hparams.num_workers > 0
         )
 
     def test_dataloader(self) -> DataLoader[Any]:
@@ -172,7 +173,7 @@ class MNISTDataModule(LightningDataModule):
             num_workers=self.hparams.num_workers,
             pin_memory=self.hparams.pin_memory,
             shuffle=False,
-            persistent_workers=True
+            persistent_workers=self.hparams.num_workers > 0
         )
 
     def teardown(self, stage: Optional[str] = None) -> None:
@@ -201,4 +202,16 @@ class MNISTDataModule(LightningDataModule):
 
 
 if __name__ == "__main__":
-    _ = MNISTDataModule()
+    dm = LinearDataModule()
+    dm.setup(stage="fit")
+    print(len(dm.data_train))
+    print(len(dm.data_val))
+    print(len(dm.data_test))
+    
+    print(len(dm.train_dataloader()))
+    print(len(dm.val_dataloader()))
+    print(len(dm.test_dataloader()))
+
+    X, y = next(iter(dm.train_dataloader()))
+    print(X.shape, y.shape)
+    print(X.dtype, y.dtype)
